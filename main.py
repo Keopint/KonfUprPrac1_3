@@ -1,13 +1,111 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Эмулятор командной оболочки UNIX-подобной ОС.
+Этап 5: команда chmod (изменение прав доступа в памяти).
+Вариант 18.
+"""
+
 import argparse
-import datetime
+import re
 import shlex
 import sys
 import os
 import time
+import datetime
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
     sys.stderr.reconfigure(encoding="utf-8")
+
+
+# ============================================================
+#  Утилиты для работы с правами доступа
+# ============================================================
+
+def mode_to_string(mode: int) -> str:
+    """Преобразует числовой режим (0o755) в строку 'rwxr-xr-x'."""
+    chars = []
+    for shift in (6, 3, 0):
+        bits = (mode >> shift) & 0b111
+        chars.append("r" if bits & 4 else "-")
+        chars.append("w" if bits & 2 else "-")
+        chars.append("x" if bits & 1 else "-")
+    return "".join(chars)
+
+
+def parse_symbolic_mode(current: int, mode_str: str):
+    """
+    Применяет символьный режим (u+x, go-w, a=r, ...) к текущему числу.
+    Возвращает новое число или None, если режим некорректен.
+    """
+    result = current
+
+    for clause in mode_str.split(","):
+        m = re.match(r"^([ugoa]*)([+\-=])([rwx]*)$", clause)
+        if not m:
+            return None
+        who, op, perm_chars = m.groups()
+        if not who:
+            who = "a"
+
+        # Определяем затрагиваемые разряды
+        if "a" in who:
+            shifts = [6, 3, 0]
+        else:
+            shifts = []
+            for c in who:
+                if c == "u":
+                    shifts.append(6)
+                elif c == "g":
+                    shifts.append(3)
+                elif c == "o":
+                    shifts.append(0)
+
+        # Битовая маска из r/w/x
+        bits = 0
+        for p in perm_chars:
+            if p == "r":
+                bits |= 4
+            elif p == "w":
+                bits |= 2
+            elif p == "x":
+                bits |= 1
+            else:
+                return None
+
+        for shift in shifts:
+            mask = 0b111 << shift
+            if op == "+":
+                result |= (bits << shift)
+            elif op == "-":
+                result &= ~(bits << shift)
+            elif op == "=":
+                result = (result & ~mask) | (bits << shift)
+
+    return result & 0o777
+
+
+def parse_chmod_mode(current: int, mode_str: str):
+    """
+    Разбирает режим chmod: числовой (755, 0644) или символьный (u+x).
+    Возвращает новое число или None при ошибке.
+    """
+    # Восьмеричный режим: только цифры 0-7, длина 1-4
+    if re.match(r"^[0-7]{1,4}$", mode_str):
+        try:
+            value = int(mode_str, 8)
+        except ValueError:
+            return None
+        if value < 0 or value > 0o7777:
+            return None
+        return value & 0o777
+
+    # Символьный режим
+    if re.match(r"^[ugoa]*[+\-=][rwx]*(,[ugoa]*[+\-=][rwx]*)*$", mode_str):
+        return parse_symbolic_mode(current, mode_str)
+
+    return None
 
 
 # ============================================================
@@ -19,8 +117,8 @@ class VirtualFileSystem:
 
     def __init__(self, root_path: str = None):
         self.root_path = root_path
-        self.tree = {"type": "dir", "children": {}}
-        self.current_path_components = []  # список компонентов текущего пути
+        self.tree = {"type": "dir", "children": {}, "permissions": 0o755}
+        self.current_path_components = []
         if root_path:
             self.load(root_path)
 
@@ -34,7 +132,14 @@ class VirtualFileSystem:
         self.current_path_components = []
 
     def _read_dir(self, path: str) -> dict:
-        node = {"type": "dir", "children": {}}
+        node = {"type": "dir", "children": {}, "permissions": 0o755}
+        # Пытаемся прочитать реальные права директории
+        try:
+            st = os.stat(path)
+            node["permissions"] = st.st_mode & 0o777
+        except OSError:
+            pass
+
         try:
             for entry in os.listdir(path):
                 full = os.path.join(path, entry)
@@ -46,11 +151,19 @@ class VirtualFileSystem:
                             content = f.read()
                     except (UnicodeDecodeError, PermissionError, OSError):
                         content = ""
-                    node["children"][entry] = {"type": "file", "content": content}
+                    file_node = {"type": "file", "content": content,
+                                 "permissions": 0o644}
+                    try:
+                        st = os.stat(full)
+                        file_node["permissions"] = st.st_mode & 0o777
+                    except OSError:
+                        pass
+                    node["children"][entry] = file_node
         except PermissionError:
             raise PermissionError(f"Нет доступа к директории: {path}")
         return node
 
+    @property
     def current_path(self) -> str:
         if not self.current_path_components:
             return "/"
@@ -69,7 +182,6 @@ class VirtualFileSystem:
         return _count(self.tree)
 
     def resolve(self, path: str) -> list:
-        """Преобразует путь в список компонентов от корня."""
         if path in ("", "~"):
             return []
         if path.startswith("/"):
@@ -88,7 +200,6 @@ class VirtualFileSystem:
         return components
 
     def get_node(self, components: list):
-        """Возвращает узел VFS по списку компонентов или None."""
         node = self.tree
         for part in components:
             if node["type"] != "dir":
@@ -97,6 +208,22 @@ class VirtualFileSystem:
                 return None
             node = node["children"][part]
         return node
+
+
+# ============================================================
+#  Состояние эмулятора
+# ============================================================
+
+class EmulatorState:
+    def __init__(self):
+        self.start_time = time.time()
+        self.history = []
+
+    def add_to_history(self, line: str) -> None:
+        self.history.append(line)
+
+    def uptime_seconds(self) -> int:
+        return int(time.time() - self.start_time)
 
 
 # ============================================================
@@ -116,24 +243,6 @@ class EmulatorConfig:
         print("=" * 40)
         print()
 
-# ============================================================
-#  Состояние эмулятора (время старта, история команд)
-# ============================================================
-
-
-class EmulatorState:
-    """Хранит состояние сессии: время старта и историю команд."""
-
-    def __init__(self):
-        self.start_time = time.time()
-        self.history = []
-
-    def add_to_history(self, line: str) -> None:
-        self.history.append(line)
-
-    def uptime_seconds(self) -> int:
-        return int(time.time() - self.start_time)
-
 
 # ============================================================
 #  Парсер
@@ -151,8 +260,7 @@ def parse_command(line: str) -> list:
 #  Команды
 # ============================================================
 
-def cmd_ls(args: list, vfs: VirtualFileSystem, state: EmulatorState) -> bool:
-    """ls [-l] [-a] [путь] — список содержимого директории."""
+def cmd_ls(args, vfs, state):
     show_all = False
     long_format = False
     path = None
@@ -178,7 +286,7 @@ def cmd_ls(args: list, vfs: VirtualFileSystem, state: EmulatorState) -> bool:
                     return False
         else:
             if path is not None:
-                print(f"ls: слишком много аргументов")
+                print("ls: слишком много аргументов")
                 return False
             path = a
 
@@ -189,11 +297,17 @@ def cmd_ls(args: list, vfs: VirtualFileSystem, state: EmulatorState) -> bool:
 
     node = vfs.get_node(components)
     if node is None:
-        print(f"ls: невозможно получить доступ к '{path}': Нет такого файла или каталога")
+        print(f"ls: невозможно получить доступ к '{path}': "
+              f"Нет такого файла или каталога")
         return False
 
     if node["type"] == "file":
-        print(path if path else ".")
+        if long_format:
+            perms = mode_to_string(node.get("permissions", 0o644))
+            size = len(node.get("content", "").encode("utf-8"))
+            print(f"-{perms}  {size:>8}  {path if path else '.'}")
+        else:
+            print(path if path else ".")
         return True
 
     children = node["children"]
@@ -207,132 +321,128 @@ def cmd_ls(args: list, vfs: VirtualFileSystem, state: EmulatorState) -> bool:
     if long_format:
         for name in names:
             child = children[name]
+            perms = mode_to_string(child.get("permissions", 0o644))
             if child["type"] == "dir":
-                print(f"drwxr-xr-x  {'<DIR>':>8}  {name}")
+                print(f"d{perms}  {'<DIR>':>8}  {name}")
             else:
                 size = len(child.get("content", "").encode("utf-8"))
-                print(f"-rw-r--r--  {size:>8}  {name}")
+                print(f"-{perms}  {size:>8}  {name}")
     else:
         print("  ".join(names))
     return True
 
 
-def cmd_cd(args: list, vfs: VirtualFileSystem, state: EmulatorState) -> bool:
-    """cd [путь] — смена текущей директории."""
+def cmd_cd(args, vfs, state):
     if len(args) > 1:
         print("cd: слишком много аргументов")
         return False
-
     path = args[0] if args else "~"
     components = vfs.resolve(path)
     node = vfs.get_node(components)
-
     if node is None:
         print(f"cd: {path}: Нет такого файла или каталога")
         return False
     if node["type"] != "dir":
         print(f"cd: {path}: Не является каталогом")
         return False
-
     vfs.current_path_components = components
     return True
 
 
-def cmd_echo(args: list, vfs: VirtualFileSystem, state: EmulatorState) -> bool:
-    """echo [аргументы] — печатает аргументы через пробел."""
-    print(" ".join(args))
-    return True
-
-
-def cmd_head(args: list, vfs: VirtualFileSystem, state: EmulatorState) -> bool:
-    """head [-n N] файл — вывод первых N строк файла (по умолчанию 10)."""
-    n = 10
-    path = None
-    i = 0
-    while i < len(args):
-        a = args[i]
-        if a == "-n":
-            if i + 1 >= len(args):
-                print("head: параметр '-n' требует аргумент")
-                return False
-            try:
-                n = int(args[i + 1])
-            except ValueError:
-                print(f"head: неверное число строк: '{args[i + 1]}'")
-                return False
-            i += 2
-        elif a.startswith("-") and a[1:].isdigit():
-            n = int(a[1:])
-            i += 1
-        elif a.startswith("-"):
-            print(f"head: неизвестный параметр: {a}")
+def cmd_chmod(args, vfs, state):
+    """
+    chmod [-R] РЕЖИМ ФАЙЛ...
+    Поддерживает числовой (755) и символьный (u+x) режимы.
+    Изменения только в памяти.
+    """
+    recursive = False
+    positional = []
+    for a in args:
+        if a == "-R" or a == "--recursive":
+            recursive = True
+        elif a in ("-h", "--help"):
+            print("Использование: chmod [-R] РЕЖИМ ФАЙЛ...")
+            print("  РЕЖИМ может быть числовым (755) или символьным (u+x,go-w,a=r).")
+            return True
+        elif a.startswith("-") and len(a) > 1 and not a[1].isdigit():
+            print(f"chmod: неизвестный параметр: {a}")
             return False
         else:
-            if path is not None:
-                print("head: слишком много аргументов")
+            positional.append(a)
+
+    if len(positional) < 2:
+        print("chmod: не указан режим или файл")
+        print("Использование: chmod [-R] РЕЖИМ ФАЙЛ...")
+        return False
+
+    mode_str = positional[0]
+    targets = positional[1:]
+
+    # Проверяем режим на первом узле (для символьного режима это неважно,
+    # т.к. он применяется к текущему значению)
+    if not re.match(r"^[0-7]{1,4}$", mode_str) and \
+       not re.match(r"^[ugoa]*[+\-=][rwx]*(,[ugoa]*[+\-=][rwx]*)*$", mode_str):
+        print(f"chmod: неверный режим: '{mode_str}'")
+        return False
+
+    overall_ok = True
+    for target in targets:
+        components = vfs.resolve(target)
+        node = vfs.get_node(components)
+        if node is None:
+            print(f"chmod: невозможно получить доступ к '{target}': "
+                  f"Нет такого файла или каталога")
+            overall_ok = False
+            continue
+
+        # Если это директория без -R — предупреждаем, но применяем к ней самой
+        if node["type"] == "dir" and not recursive:
+            # Применим к самой директории (как делает GNU chmod без -R)
+            pass
+
+        def apply_mode(n):
+            current = n.get("permissions", 0o644)
+            new_mode = parse_chmod_mode(current, mode_str)
+            if new_mode is None:
                 return False
-            path = a
-            i += 1
+            n["permissions"] = new_mode
+            return True
 
-    if path is None:
-        print("head: не указан файл")
-        return False
+        def apply_recursive(n):
+            ok = apply_mode(n)
+            if n["type"] == "dir":
+                for child in n["children"].values():
+                    if not apply_recursive(child):
+                        ok = False
+            return ok
 
-    components = vfs.resolve(path)
-    node = vfs.get_node(components)
+        if recursive:
+            if not apply_recursive(node):
+                print(f"chmod: неверный режим: '{mode_str}'")
+                return False
+        else:
+            if not apply_mode(node):
+                print(f"chmod: неверный режим: '{mode_str}'")
+                return False
 
-    if node is None:
-        print(f"head: невозможно открыть '{path}': Нет такого файла или каталога")
-        return False
-    if node["type"] != "file":
-        print(f"head: ошибка чтения '{path}': Это каталог")
-        return False
-
-    content = node.get("content", "")
-    lines = content.splitlines()
-    for line in lines[:n]:
-        print(line)
-    return True
-
-
-def cmd_vfs_info(args: list, vfs: VirtualFileSystem, state: EmulatorState) -> bool:
-    print(vfs.info())
-    print(f"Текущая директория: {vfs.current_path}")
-    print(f"Всего элементов: {vfs.count_elements()}")
-    return True
+    return overall_ok
 
 
-def cmd_help(args: list, vfs: VirtualFileSystem, state: EmulatorState) -> bool:
-    print("Доступные команды:")
-    print("  ls [-l] [-a] [путь]  — список содержимого директории")
-    print("  cd [путь]            — смена текущей директории")
-    print("  uptime               — время работы эмулятора и load average")
-    print("  history [N]          — история команд (последние N, если указано)")
-    print("  vfs-info             — информация о VFS")
-    print("  help                 — эта справка")
-    print("  exit                 — выход из эмулятора")
-    return True
-
-def cmd_uptime(args: list, vfs: VirtualFileSystem, state: EmulatorState) -> bool:
-    """uptime — показывает текущее время, время работы, число пользователей, load average."""
+def cmd_uptime(args, vfs, state):
     if args:
         print("uptime: команда не принимает аргументов")
         return False
-
     now = datetime.datetime.now()
     uptime_sec = state.uptime_seconds()
     hours = uptime_sec // 3600
     minutes = (uptime_sec % 3600) // 60
-
     current_time = now.strftime("%H:%M:%S")
     print(f" {current_time} up {hours}:{minutes:02d}, 1 user, "
           f"load average: 0.00, 0.01, 0.05")
     return True
 
 
-def cmd_history(args: list, vfs: VirtualFileSystem, state: EmulatorState) -> bool:
-    """history [N] — выводит историю команд. С N — последние N команд."""
-    # Исключаем саму команду history из вывода
+def cmd_history(args, vfs, state):
     items = list(state.history)
     if items and items[-1].strip().startswith("history"):
         items = items[:-1]
@@ -356,6 +466,27 @@ def cmd_history(args: list, vfs: VirtualFileSystem, state: EmulatorState) -> boo
         print(f"{i:5d}  {cmd}")
     return True
 
+
+def cmd_vfs_info(args, vfs, state):
+    print(vfs.info())
+    print(f"Текущая директория: {vfs.current_path}")
+    print(f"Всего элементов: {vfs.count_elements()}")
+    return True
+
+
+def cmd_help(args, vfs, state):
+    print("Доступные команды:")
+    print("  ls [-l] [-a] [путь]         — список содержимого директории")
+    print("  cd [путь]                   — смена текущей директории")
+    print("  chmod [-R] РЕЖИМ ФАЙЛ...    — изменение прав доступа (в памяти)")
+    print("  uptime                      — время работы эмулятора")
+    print("  history [N]                 — история команд")
+    print("  vfs-info                    — информация о VFS")
+    print("  help                        — эта справка")
+    print("  exit                        — выход из эмулятора")
+    return True
+
+
 # ============================================================
 #  Диспетчер команд
 # ============================================================
@@ -363,17 +494,15 @@ def cmd_history(args: list, vfs: VirtualFileSystem, state: EmulatorState) -> boo
 COMMANDS = {
     "ls": cmd_ls,
     "cd": cmd_cd,
-    "echo": cmd_echo,
-    "head": cmd_head,
-    "vfs-info": cmd_vfs_info,
+    "chmod": cmd_chmod,
     "uptime": cmd_uptime,
     "history": cmd_history,
-    "help": cmd_help
+    "vfs-info": cmd_vfs_info,
+    "help": cmd_help,
 }
 
 
-def execute_command(command: str, args: list,
-                    vfs: VirtualFileSystem, state: EmulatorState) -> bool:
+def execute_command(command, args, vfs, state):
     if command == "exit":
         return True
     if command in COMMANDS:
@@ -386,12 +515,11 @@ def execute_command(command: str, args: list,
 #  Скрипт и REPL
 # ============================================================
 
-def get_prompt(vfs: VirtualFileSystem) -> str:
-    return f"vfs:{vfs.current_path()}> "
+def get_prompt(vfs):
+    return f"vfs:{vfs.current_path}> "
 
 
-def run_script(script_path: str, vfs: VirtualFileSystem,
-               state: EmulatorState) -> None:
+def run_script(script_path, vfs, state):
     if not os.path.isfile(script_path):
         print(f"Ошибка: стартовый скрипт не найден: {script_path}")
         sys.exit(1)
@@ -422,7 +550,7 @@ def run_script(script_path: str, vfs: VirtualFileSystem,
     print("\nСтартовый скрипт успешно выполнен.")
 
 
-def repl(vfs: VirtualFileSystem, state: EmulatorState) -> None:
+def repl(vfs, state):
     print(f"Добро пожаловать в эмулятор оболочки. {vfs.info()}")
     print("Введите 'help' для списка команд, 'exit' для выхода.\n")
 
@@ -456,7 +584,7 @@ def repl(vfs: VirtualFileSystem, state: EmulatorState) -> None:
 #  Точка входа
 # ============================================================
 
-def main() -> None:
+def main():
     parser = argparse.ArgumentParser(
         description="Эмулятор командной оболочки UNIX-подобной ОС (Вариант 18)"
     )

@@ -1,0 +1,58 @@
+# Тестирование команды chmod (этап 5, вариант 18)
+
+# Показать справку
+help
+chmod
+
+# Исходное состояние
+ls -l
+
+# 1. Числовой режим
+chmod 755 file1.txt
+ls -l
+chmod 0644 file1.txt
+ls -l
+
+# 2. Символьный режим: добавление
+chmod u+x file1.txt
+ls -l
+chmod go+x file1.txt
+ls -l
+
+# 3. Символьный режим: удаление
+chmod go-w file1.txt
+ls -l
+chmod u-x file1.txt
+ls -l
+
+# 4. Символьный режим: присваивание
+chmod a=r file1.txt
+ls -l
+chmod u=rwx file1.txt
+ls -l
+
+# 5. Комбинированный режим (несколько клауз через запятую)
+chmod u+x,g-w,o-r file1.txt
+ls -l
+
+# 6. Несколько целей
+chmod 600 file1.txt file2.txt
+ls -l
+
+# 7. Рекурсивный chmod на директорию
+chmod -R 755 subdir
+ls -l subdir
+
+# 8. Директория без -R (применится только к самой директории)
+chmod 700 subdir
+ls -l
+
+# 9. Обработка ошибок
+chmod 999 file1.txt
+chmod u+q file1.txt
+chmod
+chmod 755
+chmod 755 /no/such/file
+chmod
+
+exit
