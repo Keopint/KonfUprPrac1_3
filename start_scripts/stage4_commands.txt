@@ -1,0 +1,32 @@
+# Тестирование команд этапа 4 (Вариант 18)
+help
+vfs-info
+
+# ls — разные режимы
+ls
+ls -l
+ls -a
+ls -la
+ls /no/such/dir
+
+# cd — переходы и ошибки
+cd subdir
+ls
+cd ..
+cd .
+cd /
+cd nonexistent_dir
+
+# uptime
+uptime
+uptime extra_arg
+
+# history — история команд
+history
+history 5
+history abc
+
+# Обработка ошибок неизвестной команды
+unknown_command
+
+exit

@@ -1,0 +1,9 @@
+vfs-info
+ls
+ls -la
+cd /home
+cd "my documents"
+ls "folder with spaces"
+unknown_command
+vfs-info
+exit
