@@ -133,7 +133,6 @@ class VirtualFileSystem:
 
     def _read_dir(self, path: str) -> dict:
         node = {"type": "dir", "children": {}, "permissions": 0o755}
-        # Пытаемся прочитать реальные права директории
         try:
             st = os.stat(path)
             node["permissions"] = st.st_mode & 0o777
@@ -250,7 +249,7 @@ class EmulatorConfig:
 
 def parse_command(line: str) -> list:
     try:
-        return shlex.split(line)
+        return shlex.split(line) # разделение строки на элементы
     except ValueError as e:
         print(f"Ошибка разбора: {e}")
         return []
@@ -266,7 +265,7 @@ def cmd_ls(args, vfs, state):
     path = None
 
     for a in args:
-        if a.startswith("--"):
+        if a.startswith("--"):  # проверка префикса
             if a == "--all":
                 show_all = True
             elif a == "--help":
@@ -378,8 +377,6 @@ def cmd_chmod(args, vfs, state):
     mode_str = positional[0]
     targets = positional[1:]
 
-    # Проверяем режим на первом узле (для символьного режима это неважно,
-    # т.к. он применяется к текущему значению)
     if not re.match(r"^[0-7]{1,4}$", mode_str) and \
        not re.match(r"^[ugoa]*[+\-=][rwx]*(,[ugoa]*[+\-=][rwx]*)*$", mode_str):
         print(f"chmod: неверный режим: '{mode_str}'")
@@ -437,8 +434,7 @@ def cmd_uptime(args, vfs, state):
     hours = uptime_sec // 3600
     minutes = (uptime_sec % 3600) // 60
     current_time = now.strftime("%H:%M:%S")
-    print(f" {current_time} up {hours}:{minutes:02d}, 1 user, "
-          f"load average: 0.00, 0.01, 0.05")
+    print(f" {current_time} up {hours}:{minutes:02d}, 1 user")
     return True
 
 
@@ -466,6 +462,62 @@ def cmd_history(args, vfs, state):
         print(f"{i:5d}  {cmd}")
     return True
 
+def cmd_echo(args: list, vfs: VirtualFileSystem, state) -> bool:
+    """echo [аргументы] — печатает аргументы через пробел."""
+    print(" ".join(args))
+    return True
+
+
+def cmd_head(args: list, vfs: VirtualFileSystem, state) -> bool:
+    """head [-n N] файл — вывод первых N строк файла (по умолчанию 10)."""
+    n = 10
+    path = None
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "-n":
+            if i + 1 >= len(args):
+                print("head: параметр '-n' требует аргумент")
+                return False
+            try:
+                n = int(args[i + 1])
+            except ValueError:
+                print(f"head: неверное число строк: '{args[i + 1]}'")
+                return False
+            i += 2
+        elif a.startswith("-") and a[1:].isdigit():
+            n = int(a[1:])
+            i += 1
+        elif a.startswith("-"):
+            print(f"head: неизвестный параметр: {a}")
+            return False
+        else:
+            if path is not None:
+                print("head: слишком много аргументов")
+                return False
+            path = a
+            i += 1
+
+    if path is None:
+        print("head: не указан файл")
+        return False
+
+    components = vfs.resolve(path)
+    node = vfs.get_node(components)
+
+    if node is None:
+        print(f"head: невозможно открыть '{path}': Нет такого файла или каталога")
+        return False
+    if node["type"] != "file":
+        print(f"head: ошибка чтения '{path}': Это каталог")
+        return False
+
+    content = node.get("content", "")
+    lines = content.splitlines()
+    for line in lines[:n]:
+        print(line)
+    return True
+
 
 def cmd_vfs_info(args, vfs, state):
     print(vfs.info())
@@ -483,6 +535,8 @@ def cmd_help(args, vfs, state):
     print("  history [N]                 — история команд")
     print("  vfs-info                    — информация о VFS")
     print("  help                        — эта справка")
+    print("  head [-n N] файл            — вывод первых N строк файла")
+    print("  echo [аргументы]            — вывод аргументов")
     print("  exit                        — выход из эмулятора")
     return True
 
@@ -499,6 +553,8 @@ COMMANDS = {
     "history": cmd_history,
     "vfs-info": cmd_vfs_info,
     "help": cmd_help,
+    "head": cmd_head,
+    "echo": cmd_echo
 }
 
 
@@ -536,16 +592,13 @@ def run_script(script_path, vfs, state):
             parts = parse_command(line)
             if not parts:
                 print(f"Ошибка в строке {line_num}: пустая команда")
-                print("Скрипт остановлен из-за ошибки.")
-                sys.exit(1)
             command = parts[0]
             args = parts[1:]
             if command == "exit":
                 print("Выход из эмулятора.")
                 sys.exit(0)
             if not execute_command(command, args, vfs, state):
-                print(f"\nСкрипт остановлен из-за ошибки в строке {line_num}.")
-                sys.exit(1)
+                print(f"\nОшибка в строке {line_num}.")
 
     print("\nСтартовый скрипт успешно выполнен.")
 
@@ -588,7 +641,7 @@ def main():
     parser = argparse.ArgumentParser(
         description="Эмулятор командной оболочки UNIX-подобной ОС (Вариант 18)"
     )
-    parser.add_argument("--vfs", type=str, default="./",
+    parser.add_argument("--vfs", type=str, default="./vfs_samples",
                         help="Путь к директории с VFS")
     parser.add_argument("--script", type=str, default=None,
                         help="Путь к стартовому скрипту")

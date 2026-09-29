@@ -6,7 +6,7 @@ export LC_ALL=C.UTF-8
 export PYTHONIOENCODING=utf-8
 
 run_emulator() {
-    local vfs_path="$1"
+    local vfs_path="./"
     local description="$2"
     echo "=== $description ==="
     if command -v winpty >/dev/null 2>&1; then

@@ -2,10 +2,11 @@
 
 # Показать справку
 help
-chmod
 
 # Исходное состояние
 ls -l
+
+cd vfs_samples/vfs_files
 
 # 1. Числовой режим
 chmod 755 file1.txt
